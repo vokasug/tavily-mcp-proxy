@@ -1,0 +1,18 @@
+[Unit]
+Description=Tavily MCP backend (auth + quota-aware proxy)
+Documentation=https://github.com/vokasug/tavily-mcp-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/tavily-mcp
+ExecStart=/opt/tavily-mcp/venv/bin/python /opt/tavily-mcp/backend.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

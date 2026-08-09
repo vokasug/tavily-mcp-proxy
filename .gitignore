@@ -1,0 +1,24 @@
+# Secrets / runtime config — never commit
+/etc/tavily-mcp/tavily-keys.list
+/etc/tavily-mcp/access-keys.list
+/etc/tavily-mcp/active-key
+/etc/tavily-mcp/active-key.status
+*.key
+*.pem
+.env
+
+# Editor / OS
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs
+*.log

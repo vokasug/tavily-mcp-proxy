@@ -1,0 +1,8 @@
+[Unit]
+Description=Tavily MCP quota checker
+Documentation=https://github.com/vokasug/tavily-mcp-proxy
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/tavily-mcp/venv/bin/python /opt/tavily-mcp/quota_checker.py

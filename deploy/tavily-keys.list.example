@@ -1,0 +1,8 @@
+# Tavily keys (one per line; lines starting with # and blank lines are ignored).
+# DO NOT commit real keys. Replace the entries below with placeholders before
+# publishing your own fork — the real file lives only on the VPS at
+# /etc/tavily-mcp/tavily-keys.list (mode 0600, root:root).
+tvly-dev-PLACEHOLDER-XXXXXXXXXXXXXXXXXXXXXXXXXXXX
+tvly-dev-PLACEHOLDER-XXXXXXXXXXXXXXXXXXXXXXXXXXXX
+tvly-dev-PLACEHOLDER-XXXXXXXXXXXXXXXXXXXXXXXXXXXX
+tvly-dev-PLACEHOLDER-XXXXXXXXXXXXXXXXXXXXXXXXXXXX

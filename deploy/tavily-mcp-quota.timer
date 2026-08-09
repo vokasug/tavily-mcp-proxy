@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Tavily quota refresh (05:00 Europe/Moscow)
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 Europe/Moscow
+Persistent=true
+AccuracySec=30s
+Unit=tavily-mcp-quota.service
+
+[Install]
+WantedBy=timers.target

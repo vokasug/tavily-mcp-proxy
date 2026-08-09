@@ -1,0 +1,8 @@
+# Access keys for proxy clients (name<TAB/whitespace>key per line).
+# DO NOT commit real access keys. Replace with placeholders before publishing.
+# Generate with:
+#   python3 -c 'import secrets,base64;print("tvmcp_"+base64.urlsafe_b64encode(secrets.token_bytes(36)).decode().rstrip("="))'
+#
+# On the backend, SIGHUP reloads this file without restart:
+#   kill -HUP $(pgrep -f backend.py)
+my	tvmcp_PLACEHOLDER_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
