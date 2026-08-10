@@ -48,10 +48,21 @@ systemd timer (05:00 Europe/Moscow, daily):
 
 ### Домен и сертификат
 
-- Имя: `<YOUR-HOST>.sslip.io` → ваш IP (бесплатный wildcard-DNS sslip.io; зеркало `nip.io` — запасное при rate-limit LE).
-- Сертификат Let's Encrypt: `/etc/letsencrypt/live/<YOUR-HOST>.sslip.io/`. Срок ~90 дней, автопродление `certbot.timer`.
-- ACME HTTP-01 challenge обслуживается блоком на 80 порту (`location /.well-known/acme-challenge/`).
+- Имя: `<YOUR-HOST>.sslip.io` → ваш IP. Используется бесплатный wildcard-DNS-сервис sslip.io: имя `<IP-С-ДЕФИСАМИ>.sslip.io` автоматически резолвится в IP, зашитый в имя. Регистрация в DNS не нужна.
+- **sslip.io и nip.io — это разные DNS-сервисы, а не зеркала.** Переключение на `nip.io` при rate-limit LE означает генерацию нового имени (`<IP-С-ДЕФИСАМИ>.nip.io`), выпуск нового сертификата, обновление `server_name` в nginx **и обновление URL в MCP-клиенте** (для LE это разные домены — rate-limit sslip.io не действует на nip.io).
+- Сертификат Let's Encrypt: `/etc/letsencrypt/live/<YOUR-HOST>.sslip.io/`. Срок 90 дней, автопродление `certbot.timer` (systemd) — каждые ~12 часов проверяет, осталось ли <30 дней, и при необходимости перевыпускает. Файлы: `fullchain.pem`, `privkey.pem`. Если таймер по какой-то причине не отработал — `certbot renew` вручную; статус: `systemctl status certbot.timer`, `journalctl -u certbot.service`.
+- ACME HTTP-01 challenge обслуживается блоком на 80 порту (`location /.well-known/acme-challenge/`). Поэтому 80 порт должен быть открыт снаружи (по умолчанию открыт на VPSNL1).
 - Имя хоста публично видно в Certificate Transparency логах — это нормально, безопасность держится на секретности ключей.
+
+### ⚠️ Что ломает MCP-клиент при смене IP VPS
+
+Имя `<IP-С-ДЕФИСАМИ>.sslip.io` привязано к IP. Если IP VPS меняется (переустановка, миграция, смена тарифа), то:
+
+- Резолв старого имени перестаёт указывать на новый IP.
+- Старый сертификат остаётся валидным по дате, но клиент обращается к чужому IP → TLS-хендшейк не пройдёт.
+- **OpenCode (и любой MCP-клиент) перестаёт работать** до тех пор, пока на клиентской машине не обновится URL на новое имя.
+
+Порядок действий — в Troubleshooting ниже («IP VPS сменился»).
 
 ### nginx
 
@@ -198,7 +209,12 @@ cat /etc/tavily-mcp/active-key       # должен быть лексикогр�
   ```
 - **Добавить новый Tavily-ключ** — дописать строку в `/etc/tavily-mcp/tavily-keys.list`; следующий запуск quota-checker учтёт.
 - **Добавить второй access-ключ** — дописать строку в `/etc/tavily-mcp/access-keys.list` (`other_name\ttvmcp_…`); `kill -HUP $(pgrep -f backend.py)` для перечитки без рестарта.
-- **IP VPS сменился** — sslip.io-имя привязывается к IP. Сгенерировать новое имя `<новый-IP-с-дефисами>.sslip.io` (или перейти на nip.io), обновить `server_name` в nginx + URL клиента, перевыпустить сертификат.
+- **IP VPS сменился** — ssip.io-имя привязано к IP, после смены IP оно указывает на чужой адрес. **MCP-клиент перестаёт работать** до обновления URL на его стороне. Чеклист:
+  1. Определить новый IP (`ip -4 addr show` на VPS или через панель хостера).
+  2. Сгенерировать новое имя: `<НОВЫЙ-IP-С-ДЕФИСАМИ>.sslip.io` (или `.nip.io`, если sslip.io в LE rate-limit).
+  3. На VPS: `certbot --nginx -d <НОВОЕ-ИМЯ>` (выпустит сертификат, обновит `server_name` в nginx, перезагрузит nginx). Альтернативно вручную: получить сертификат, прописать пути в `/etc/nginx/sites-available/tavily-mcp`, `nginx -t && systemctl reload nginx`.
+  4. На Mac: обновить `mcp.tavily.url` в `~/.config/opencode/opencode.jsonc` на `https://<НОВОЕ-ИМЯ>/mcp/?accessKey=<тот же accessKey>`, перезапустить сессию OpenCode. **Этот шаг обязателен — без него MCP работать не будет.**
+  5. Старый сертификат можно удалить: `certbot delete --cert-name <СТАРОЕ-ИМЯ>`.
 
 ## Восстановление с нуля (runbook)
 
