@@ -105,7 +105,23 @@ kill -HUP $(pgrep -f backend.py)
 - Real Tavily keys live only on the VPS (0600, root). They are never sent to clients.
 - Real access keys (`tvmcp_…`) live only on the VPS and in client config files you control — never commit them to a public repo.
 - nginx `mcp_nosecret` log format omits the query string, so neither Tavily keys nor access keys are written to access logs.
-- fail2ban: 5 × HTTP 401 from one IP within 24 h → permanent ban via nftables (ports 80/443). SSH (port 22) is never banned. Unban manually: `ssh vps 'fail2ban-client unban <IP>'`.
+- **fail2ban** (permanent bans via `nftables-allports`, see `AGENTS.md` → «Защита VPS» for details):
+  - `sshd`: 5 failed SSH logins / 24 h → total ban (all TCP).
+  - `nginx-scan`: 1 request to scanner paths (`.env`, `wp-admin`, `xmlrpc.php`, `phpmyadmin`, …) → total ban.
+  - `tavily-mcp`: 5 × HTTP 401 on `/mcp/` / 24 h → permanent ban on ports 80/443.
+  - SSH (port 22) is never banned. Unban manually: `ssh vps 'fail2ban-client unban <IP>'`.
+  - **Self-ban hazard:** 5 wrong SSH attempts (stale key in `ssh-agent`) or 1 stray `curl` to a scanner path locks you out of the VPS from your home IP. Recover via mobile hotspot / VPN / hoster web console, then unban.
+
+## HTTPS / domain
+
+The proxy needs a public HTTPS endpoint. Setup (see `AGENTS.md` → «Домен и сертификат» and runbook for full details):
+
+1. **Free wildcard DNS**: point `<YOUR-VPS-IP-WITH-DASHES>.sslip.io` (or `nip.io`) at your VPS — these services resolve `<anything>.<sslip-or-nip>.io` to whatever IP is in the name, no DNS account required.
+2. **Let's Encrypt certificate** via `certbot --nginx -d <YOUR-HOST>.sslip.io` (HTTP-01 challenge on port 80).
+3. **Auto-renewal** is handled by `certbot.timer` (renews ~30 days before expiry).
+4. Mirror at `nip.io` is used as a fallback if Let's Encrypt rate-limits the primary hostname.
+
+The hostname is visible in public Certificate Transparency logs — that's expected; security relies on the secrecy of the keys (`accessKey` for clients, real Tavily keys on the VPS only).
 
 ## License
 
