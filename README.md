@@ -1,58 +1,59 @@
 # tavily-mcp-proxy
 
-Reverse-proxy for the [Tavily MCP](https://www.tavily.com) endpoint, designed to:
+Reverse-прокси для эндпоинта [Tavily MCP](https://www.tavily.com), который:
 
-1. **Bypass geo-blocking** for clients on sanctioned-country IPs (RU, etc.) — the proxy lives on a VPS in a country where Tavily is reachable and forwards requests.
-2. **Rotate across multiple Tavily API keys** by picking the one with the largest remaining quota, automatically once per day. When all quota checks fail, the proxy returns **HTTP 503** to every client (fail-loud) until the situation recovers.
-3. **Authenticate clients** by an `accessKey` query parameter so that the real Tavily API keys never reach client machines and aren't exposed in client config files.
+1. **Обходит гео-блокировку** для клиентов на IP из санкционных территорий (RU и др.) — прокси живёт на VPS в стране, откуда Tavily доступен, и пересылает запросы.
+2. **Ротирует несколько Tavily API-ключей**, выбирая раз в сутки ключ с наибольшим остатком квоты. Если ни один ключ не удалось проверить — прокси возвращает **HTTP 503** всем клиентам (fail-loud) до восстановления.
+3. **Аутентифицирует клиентов** по query-параметру `accessKey`, чтобы реальные Tavily-ключи никогда не попадали на клиентские машины и не светились в клиентских конфигах.
 
 ```
 ┌──────────┐    ?accessKey=tvmcp_…     ┌─────────┐    ?tavilyApiKey=<active>    ┌────────┐
-│  Client  │ ───────────────────────► │  nginx  │ ───────────────────────────► │ Tavily │
+│ Клиент   │ ───────────────────────► │  nginx  │ ───────────────────────────► │ Tavily │
 └──────────┘     TLS + fail2ban        │  (TLS)  │                              └────────┘
                                        └────┬────┘
                                             │ http://127.0.0.1:8741
                                             ▼
                               ┌──────────────────────────────┐
                               │  tavily-mcp-backend (aiohttp) │
-                              │   • checks accessKey         │
-                              │   • picks active Tavily key  │
-                              │   • streams SSE upstream     │
+                              │   • проверяет accessKey      │
+                              │   • подставляет активный     │
+                              │     Tavily-ключ              │
+                              │   • стримит SSE upstream     │
                               └──────────────────────────────┘
                                             ▲
-                                            │ daily 05:00 Europe/Moscow
+                                            │ ежедневно в 05:00 Europe/Moscow
                                             │
                               ┌──────────────────────────────┐
                               │   quota_checker.py           │
-                              │   • GET /usage per key       │
-                              │   • writes active-key atomically │
+                              │   • GET /usage на каждый ключ│
+                              │   • атомарно пишет active-key│
                               └──────────────────────────────┘
 ```
 
-## What's in this repository
+## Состав репозитория
 
-| Path | Purpose |
+| Путь | Назначение |
 |---|---|
-| `backend.py` | aiohttp service that authenticates clients and proxies `/mcp/*` to Tavily with the active key |
-| `quota_checker.py` | Daily selector: picks the Tavily key with the most remaining quota, ties broken lexicographically |
+| `backend.py` | aiohttp-сервис: аутентифицирует клиентов и проксирует `/mcp/*` к Tavily с активным ключом |
+| `quota_checker.py` | Ежедневный селектор: выбирает Tavily-ключ с максимальным остатком квоты, при равенстве — лексикографически первый |
 | `requirements.txt` | `aiohttp>=3.9` |
-| `deploy/tavily-mcp-backend.service` | systemd unit for the backend |
-| `deploy/tavily-mcp-quota.{service,timer}` | systemd oneshot + 05:00 Europe/Moscow timer |
-| `deploy/tavily-mcp.nginx.conf` | nginx TLS + ACME + reverse proxy template (`YOUR-HOST.sslip.io` placeholder) |
-| `deploy/tavily-keys.list.example` | Format example for `/etc/tavily-mcp/tavily-keys.list` (no real keys) |
-| `deploy/access-keys.list.example` | Format example for `/etc/tavily-mcp/access-keys.list` (no real keys) |
-| `AGENTS.md` | Full deployment guide, troubleshooting, security notes, and runbook |
+| `deploy/tavily-mcp-backend.service` | systemd-юнит бэкенда |
+| `deploy/tavily-mcp-quota.{service,timer}` | systemd oneshot + таймер на 05:00 Europe/Moscow |
+| `deploy/tavily-mcp.nginx.conf` | Шаблон nginx: TLS + ACME + reverse-прокси (плейсхолдер `YOUR-HOST.sslip.io`) |
+| `deploy/tavily-keys.list.example` | Пример формата `/etc/tavily-mcp/tavily-keys.list` (без реальных ключей) |
+| `deploy/access-keys.list.example` | Пример формата `/etc/tavily-mcp/access-keys.list` (без реальных ключей) |
+| `AGENTS.md` | Полное руководство: развёртывание, troubleshooting, безопасность, runbook |
 
-## Quick start (TL;DR)
+## Быстрый старт (TL;DR)
 
-See `AGENTS.md` for the full runbook. The shortest path is:
+Полный runbook — в `AGENTS.md`. Самый короткий путь:
 
 ```bash
-# On the VPS (Ubuntu 24.04) — see AGENTS.md for details
+# На VPS (Ubuntu 24.04) — детали в AGENTS.md
 apt-get install -y nginx certbot python3-certbot-nginx fail2ban python3-venv python3-pip
 
 mkdir -p /etc/tavily-mcp /opt/tavily-mcp
-# populate /etc/tavily-mcp/tavily-keys.list and access-keys.list (see deploy/*.example)
+# заполнить /etc/tavily-mcp/tavily-keys.list и access-keys.list (см. deploy/*.example)
 
 cd /opt/tavily-mcp
 python3 -m venv venv
@@ -61,7 +62,7 @@ venv/bin/pip install -r requirements.txt
 cp deploy/tavily-mcp-backend.service deploy/tavily-mcp-quota.service \
    deploy/tavily-mcp-quota.timer /etc/systemd/system/
 cp deploy/tavily-mcp.nginx.conf /etc/nginx/sites-available/tavily-mcp
-# edit YOUR-HOST.sslip.io in the nginx config, then:
+# отредактировать YOUR-HOST.sslip.io в конфиге nginx, затем:
 ln -sf /etc/nginx/sites-available/tavily-mcp /etc/nginx/sites-enabled/tavily-mcp
 nginx -t && systemctl reload nginx
 
@@ -69,60 +70,60 @@ systemctl daemon-reload
 systemctl enable --now tavily-mcp-backend tavily-mcp-quota.timer
 ```
 
-Configure your MCP client (e.g. OpenCode, Claude Desktop, MCP CLI) with:
+Конфигурация MCP-клиента (OpenCode, Claude Desktop, MCP CLI и т.п.):
 
 ```
-https://YOUR-HOST.sslip.io/mcp/?accessKey=tvmcp_<your-generated-key>
+https://YOUR-HOST.sslip.io/mcp/?accessKey=tvmcp_<ваш-сгенерированный-ключ>
 ```
 
-## Configuration files on the server
+## Конфигурационные файлы на сервере
 
-| Path | Mode | Format | Purpose |
+| Путь | Права | Формат | Назначение |
 |---|---|---|---|
-| `/etc/tavily-mcp/tavily-keys.list` | 0600 | one Tavily key per line | All keys the quota-checker rotates across |
-| `/etc/tavily-mcp/access-keys.list` | 0600 | `<name><whitespace><key>` per line | Access keys clients must present |
-| `/etc/tavily-mcp/active-key` | 0644 | one line — the currently active Tavily key | Read fresh on every backend request |
-| `/etc/tavily-mcp/active-key.status` | 0644 | `ok` or `unknown` | Tells the backend whether to serve or 503 |
+| `/etc/tavily-mcp/tavily-keys.list` | 0600 | по одному Tavily-ключу на строку | Все ключи, между которыми ротирует quota-checker |
+| `/etc/tavily-mcp/access-keys.list` | 0600 | `<имя><пробел/таб><ключ>` на строку | Access-ключи клиентов |
+| `/etc/tavily-mcp/active-key` | 0644 | одна строка — текущий активный Tavily-ключ | Читается заново на каждом запросе бэкенда |
+| `/etc/tavily-mcp/active-key.status` | 0644 | `ok` или `unknown` | Говорит бэкенду: обслуживать или отдавать 503 |
 
-`active-key` is rewritten **atomically** (`tempfile → fsync → os.replace`) by `quota_checker.py`. The backend reads it on every request, so rotation takes effect without restarting anything.
+`active-key` переписывается **атомарно** (`tempfile → fsync → os.replace`) скриптом `quota_checker.py`. Бэкенд читает файл на каждый запрос, поэтому переключение ключа происходит без рестарта.
 
-## Generate an access key
+## Генерация access-ключа
 
 ```bash
 python3 -c 'import secrets, base64; print("tvmcp_" + base64.urlsafe_b64encode(secrets.token_bytes(36)).decode().rstrip("="))'
 ```
 
-After changing `/etc/tavily-mcp/access-keys.list`:
+После изменения `/etc/tavily-mcp/access-keys.list`:
 
 ```bash
 kill -HUP $(pgrep -f backend.py)
 ```
 
-…or restart the systemd service.
+…или перезапустить systemd-сервис.
 
-## Security highlights
+## Безопасность
 
-- Real Tavily keys live only on the VPS (0600, root). They are never sent to clients.
-- Real access keys (`tvmcp_…`) live only on the VPS and in client config files you control — never commit them to a public repo.
-- nginx `mcp_nosecret` log format omits the query string, so neither Tavily keys nor access keys are written to access logs.
-- **fail2ban** (permanent bans via `nftables-allports`, see `AGENTS.md` → «Защита VPS» for details):
-  - `sshd`: 5 failed SSH logins / 24 h → total ban (all TCP).
-  - `nginx-scan`: 1 request to scanner paths (`.env`, `wp-admin`, `xmlrpc.php`, `phpmyadmin`, …) → total ban.
-  - `tavily-mcp`: 5 × HTTP 401 on `/mcp/` / 24 h → permanent ban on ports 80/443.
-  - SSH (port 22) is never banned. Unban manually: `ssh vps 'fail2ban-client unban <IP>'`.
-  - **Self-ban hazard:** 5 wrong SSH attempts (stale key in `ssh-agent`) or 1 stray `curl` to a scanner path locks you out of the VPS from your home IP. Recover via mobile hotspot / VPN / hoster web console, then unban.
+- Реальные Tavily-ключи живут только на VPS (0600, root). Клиентам никогда не передаются.
+- Реальные access-ключи (`tvmcp_…`) живут только на VPS и в клиентских конфигах под вашим контролем — не коммитьте их в публичные репозитории.
+- Формат лога nginx `mcp_nosecret` не пишет query string, поэтому ни Tavily-ключи, ни access-ключи в access-логе не оседают.
+- **fail2ban** (перманентные баны через `nftables-allports`, подробности — в `AGENTS.md` → «Защита VPS»):
+  - `sshd`: 5 неудачных SSH-логинов за 24 ч → тотальный бан (весь TCP).
+  - `nginx-scan`: 1 запрос к путям сканеров (`.env`, `wp-admin`, `xmlrpc.php`, `phpmyadmin`, …) → тотальный бан.
+  - `tavily-mcp`: 5 × HTTP 401 на `/mcp/` за 24 ч → перманентный бан портов 80/443.
+  - Порт 22 (SSH) не банится никогда. Разбан вручную: `ssh vps 'fail2ban-client unban <IP>'`.
+  - **Самобан — критично:** 5 неудачных SSH-попыток (протухший ключ в `ssh-agent`) или 1 случайный `curl` к пути сканера = потеря доступа к VPS с вашего домашнего IP. Восстановление: мобильный хотспот / VPN / веб-консоль хостера, затем разбан.
 
-## HTTPS / domain
+## HTTPS / домен
 
-The proxy needs a public HTTPS endpoint. Setup (see `AGENTS.md` → «Домен и сертификат» and runbook for full details):
+Прокси требует публичный HTTPS-эндпоинт. Настройка (полные детали — в `AGENTS.md` → «Домен и сертификат» и runbook):
 
-1. **Free wildcard DNS**: point `<YOUR-VPS-IP-WITH-DASHES>.sslip.io` (or `nip.io`) at your VPS — these services resolve `<anything>.<sslip-or-nip>.io` to whatever IP is in the name, no DNS account required.
-2. **Let's Encrypt certificate** via `certbot --nginx -d <YOUR-HOST>.sslip.io` (HTTP-01 challenge on port 80).
-3. **Auto-renewal** is handled by `certbot.timer` (renews ~30 days before expiry).
-4. Mirror at `nip.io` is used as a fallback if Let's Encrypt rate-limits the primary hostname.
+1. **Бесплатный wildcard-DNS**: имя `<IP-С-ДЕФИСАМИ>.sslip.io` (или `nip.io`) автоматически резолвится в IP, зашитый в имя. Регистрация в DNS не нужна.
+2. **Сертификат Let's Encrypt** через `certbot --nginx -d <YOUR-HOST>.sslip.io` (HTTP-01 challenge на 80 порту).
+3. **Автопродление** — `certbot.timer` (обновляет примерно за 30 дней до истечения).
+4. Зеркало на `nip.io` используется как запасное при rate-limit Let's Encrypt на основной домен.
 
-The hostname is visible in public Certificate Transparency logs — that's expected; security relies on the secrecy of the keys (`accessKey` for clients, real Tavily keys on the VPS only).
+Имя хоста видно в публичных логах Certificate Transparency — это нормально. Безопасность держится на секретности ключей (`accessKey` у клиентов, реальные Tavily-ключи — только на VPS).
 
-## License
+## Лицензия
 
-MIT (placeholder — adjust to your preference).
+MIT (заглушка — поменяйте по желанию).
