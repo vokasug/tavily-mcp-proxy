@@ -108,6 +108,10 @@ def main():
     for k in keys:
         info = fetch_quota(k)
         if info is not None:
+            log.info(
+                "key=%s… remaining=%s (used=%s/%s)",
+                k[:14], info["remaining"], info["used"], info["limit"],
+            )
             results.append((k, info))
         else:
             log.warning("skipping key %s… (quota unavailable)", k[:14])
