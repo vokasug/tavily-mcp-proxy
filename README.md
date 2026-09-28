@@ -104,6 +104,7 @@ kill -HUP $(pgrep -f backend.py)
 - Реальные Tavily-ключи живут только на VPS (0600, root). Клиентам никогда не передаются.
 - Реальные access-ключи (`tvmcp_…`) живут только на VPS и в клиентских конфигах под вашим контролем — не коммитьте их в публичные репозитории.
 - Формат лога nginx `mcp_nosecret` не пишет query string, поэтому ни Tavily-ключи, ни access-ключи в access-логе не оседают.
+- Бэкенд логирует в journal каждый принятый запрос с **именем** access-ключа (не самим ключом): `req: key=<имя> client=<ip> …` — это даёт статистику использования по ключам (`journalctl -u tavily-mcp-backend | grep -c 'req: key=<имя>'`). Встроенный access-log aiohttp отключён — он слил бы `accessKey` из query string.
 - **fail2ban** банит **IP-адрес источника** перманентно через `nftables-allports` (подробности — в `AGENTS.md` → «Защита VPS»):
   - `sshd`: 5 неудачных SSH-логинов с одного IP за 24 ч → IP блокируется на всех TCP-портах.
   - `nginx-scan`: 1 запрос с IP к путям сканеров (`.env`, `wp-admin`, `xmlrpc.php`, `phpmyadmin`, …) → IP блокируется на всех TCP-портах.
