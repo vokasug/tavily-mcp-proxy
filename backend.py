@@ -86,6 +86,9 @@ async def proxy_handler(request: web.Request):
         log.info("reject: wrong accessKey client=%s path=%s", request.remote, request.path)
         return web.Response(status=401, text="unauthorized\n")
 
+    key_name = next((n for n, k in _access_keys.items() if k == provided), "?")
+    log.info("req: key=%s client=%s method=%s path=%s", key_name, request.remote, request.method, request.path)
+
     active, ok = read_active_key()
     if not ok:
         log.error("no active tavily key (status check failed); client=%s", request.remote)
@@ -133,10 +136,10 @@ async def proxy_handler(request: web.Request):
                     headers=resp_headers,
                 )
     except asyncio.TimeoutError:
-        log.error("upstream timeout url=%s", upstream_url)
+        log.error("upstream timeout path=%s key=%s", request.path, key_name)
         return web.Response(status=504, text="upstream timeout\n")
     except aiohttp.ClientError as e:
-        log.error("upstream error: %s url=%s", e, upstream_url)
+        log.error("upstream error: %s path=%s key=%s", e, request.path, key_name)
         return web.Response(status=502, text="upstream error\n")
 
 
@@ -172,7 +175,7 @@ async def main():
     signal.signal(signal.SIGHUP, _reload_handler)
 
     app = make_app()
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)  # default access log leaks accessKey via query string
     await runner.setup()
     site = web.TCPSite(runner, LISTEN_HOST, LISTEN_PORT)
     await site.start()

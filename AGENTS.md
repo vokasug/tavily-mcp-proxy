@@ -117,7 +117,7 @@ systemd timer (05:00 Europe/Moscow, daily):
   4. Проксирует на `https://mcp.tavily.com<path>?<query>` через `aiohttp.ClientSession` (TLS-хоп напрямую к Tavily).
   5. Если upstream отвечает `text/event-stream` / `Transfer-Encoding: chunked` / `Content-Length` отсутствует — ретранслирует чанки через `web.StreamResponse` (SSE). Иначе — обычный `web.Response`.
 - Таймауты: connect 30s, total/sock_read 3600s.
-- Логи: journal (через stderr) — INFO для обычных запросов, ERROR для fail-loud / upstream-ошибок.
+- Логи: journal (через stderr) — INFO для обычных запросов (`req: key=<имя> client=<ip> method=<m> path=<p>`, без секретов; aiohttp access-log отключён — он слил бы accessKey из query string), ERROR для fail-loud / upstream-ошибок. Статистика по ключам: `journalctl -u tavily-mcp-backend | grep -c 'req: key=kaeria'`.
 - Сигналы: SIGTERM/SIGINT — graceful shutdown; SIGHUP — перечитать `access-keys.list` (для ротации без рестарта).
 
 **quota_checker.py** (`/opt/tavily-mcp/venv/bin/python quota_checker.py`):
