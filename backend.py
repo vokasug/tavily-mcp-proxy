@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -69,6 +70,41 @@ def read_active_key():
     return key, True
 
 
+def _client_ip(request):
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote
+
+
+def _summarize_body(body, max_args=200):
+    if not body:
+        return ""
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return " body=<non-json %dB>" % len(body)
+    items = data if isinstance(data, list) else [data]
+    parts = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        s = str(item.get("method", "?"))
+        params = item.get("params")
+        if isinstance(params, dict):
+            name = params.get("name")
+            if name:
+                s += ":%s" % name
+            args = params.get("arguments")
+            if args is not None:
+                args_s = json.dumps(args, ensure_ascii=False)
+                if len(args_s) > max_args:
+                    args_s = args_s[:max_args] + "…"
+                s += " %s" % args_s
+        parts.append(s)
+    return " rpc=" + ";".join(parts)
+
+
 def _filter_response_headers(headers):
     return {
         k: v
@@ -78,20 +114,20 @@ def _filter_response_headers(headers):
 
 
 async def proxy_handler(request: web.Request):
+    client = _client_ip(request)
     provided = request.query.get("accessKey")
     if not provided:
-        log.info("reject: missing accessKey client=%s path=%s", request.remote, request.path)
+        log.info("reject: missing accessKey client=%s path=%s", client, request.path)
         return web.Response(status=401, text="unauthorized\n")
     if provided not in _access_keys.values():
-        log.info("reject: wrong accessKey client=%s path=%s", request.remote, request.path)
+        log.info("reject: wrong accessKey client=%s path=%s", client, request.path)
         return web.Response(status=401, text="unauthorized\n")
 
     key_name = next((n for n, k in _access_keys.items() if k == provided), "?")
-    log.info("req: key=%s client=%s method=%s path=%s", key_name, request.remote, request.method, request.path)
 
     active, ok = read_active_key()
     if not ok:
-        log.error("no active tavily key (status check failed); client=%s", request.remote)
+        log.error("no active tavily key (status check failed); client=%s", client)
         return web.Response(status=503, text="no active key\n")
 
     query_pairs = [(k, v) for k, v in request.query.items() if k != "accessKey"]
@@ -104,6 +140,10 @@ async def proxy_handler(request: web.Request):
         if k.lower() not in {"host", "content-length", "authorization", "connection"}
     }
     body = await request.read() if request.body_exists or request.can_read_body else b""
+    log.info(
+        "req: key=%s client=%s method=%s path=%s%s",
+        key_name, client, request.method, request.path, _summarize_body(body),
+    )
 
     timeout = aiohttp.ClientTimeout(total=3600, connect=30, sock_read=3600)
     try:
