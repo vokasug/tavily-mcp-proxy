@@ -45,7 +45,7 @@ async def mock_mcp(request):
     msg = {"jsonrpc": "2.0", "id": rid, "result": result}
     if request.headers.get("X-Mock-Json"):
         return web.json_response(msg)
-    sse = "event: message\ndata: %s\n\n" % json.dumps(msg, ensure_ascii=False)
+    sse = "event: message\r\ndata: %s\r\n\r\n" % json.dumps(msg, ensure_ascii=False)
     return web.Response(text=sse, content_type="text/event-stream")
 
 
@@ -115,6 +115,15 @@ async def main():
             names = [t["name"] for t in msg["result"]["tools"]]
             assert status == 200, status
             assert names == ["tavily_search", "tavily_extract"], names
+
+            # 2b. пересобранный SSE чистый: без CR и без мусорных строк между event: и data:
+            async with session.post(url, json={
+                "jsonrpc": "2.0", "id": 20, "method": "tools/list", "params": {}},
+                headers={"Content-Type": "application/json",
+                         "Accept": "application/json, text/event-stream"}) as resp:
+                raw = await resp.text()
+            assert "\r" not in raw, repr(raw[:200])
+            assert "event: message\ndata: {" in raw, repr(raw[:200])
 
             # 3. tools/list (JSON-ответ от upstream): тоже фильтруется
             status, msg = await rpc(session, url, {

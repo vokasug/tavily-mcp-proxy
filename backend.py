@@ -159,6 +159,7 @@ def _filter_sse_tools(payload):
         text = payload.decode("utf-8")
     except UnicodeDecodeError:
         return payload
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     out = []
     for event in text.split("\n\n"):
         lines = event.split("\n")
