@@ -15,6 +15,13 @@ CONFIG_DIR = Path(os.environ.get("TAVILY_MCP_CONFIG_DIR", "/etc/tavily-mcp"))
 LISTEN_HOST = os.environ.get("TAVILY_MCP_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("TAVILY_MCP_PORT", "8741"))
 UPSTREAM = os.environ.get("TAVILY_MCP_UPSTREAM", "https://mcp.tavily.com").rstrip("/")
+BLOCKED_TOOLS = frozenset(
+    t.strip()
+    for t in os.environ.get(
+        "TAVILY_MCP_BLOCKED_TOOLS", "tavily_crawl,tavily_research"
+    ).split(",")
+    if t.strip()
+)
 
 ACCESS_KEYS_FILE = CONFIG_DIR / "access-keys.list"
 ACTIVE_KEY_FILE = CONFIG_DIR / "active-key"
@@ -105,6 +112,76 @@ def _summarize_body(body, max_args=200):
     return " rpc=" + ";".join(parts)
 
 
+def _parse_rpc_items(body):
+    if not body:
+        return None
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    items = data if isinstance(data, list) else [data]
+    return data, [i for i in items if isinstance(i, dict)]
+
+
+def _is_blocked_call(item):
+    params = item.get("params")
+    return (
+        item.get("method") == "tools/call"
+        and isinstance(params, dict)
+        and params.get("name") in BLOCKED_TOOLS
+    )
+
+
+def _filter_tools_in(obj):
+    items = obj if isinstance(obj, list) else [obj]
+    removed = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result")
+        if isinstance(result, dict) and isinstance(result.get("tools"), list):
+            kept = [
+                t
+                for t in result["tools"]
+                if not (isinstance(t, dict) and t.get("name") in BLOCKED_TOOLS)
+            ]
+            removed.extend(
+                t.get("name")
+                for t in result["tools"]
+                if isinstance(t, dict) and t.get("name") in BLOCKED_TOOLS
+            )
+            result["tools"] = kept
+    return removed
+
+
+def _filter_sse_tools(payload):
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return payload
+    out = []
+    for event in text.split("\n\n"):
+        lines = event.split("\n")
+        data_lines = [l[5:].removeprefix(" ") for l in lines if l.startswith("data:")]
+        if not data_lines:
+            out.append(event)
+            continue
+        try:
+            obj = json.loads("\n".join(data_lines))
+        except ValueError:
+            out.append(event)
+            continue
+        removed = _filter_tools_in(obj)
+        if removed:
+            log.info("tools/list: hid %s", ", ".join(sorted(set(removed))))
+            lines = [l for l in lines if not l.startswith("data:")]
+            lines.append("data: " + json.dumps(obj, ensure_ascii=False))
+            out.append("\n".join(lines))
+        else:
+            out.append(event)
+    return "\n\n".join(out).encode("utf-8")
+
+
 def _filter_response_headers(headers):
     return {
         k: v
@@ -145,6 +222,40 @@ async def proxy_handler(request: web.Request):
         key_name, client, request.method, request.path, _summarize_body(body),
     )
 
+    parsed = _parse_rpc_items(body)
+    rpc_items = parsed[1] if parsed else []
+    wants_tools_list = any(i.get("method") == "tools/list" for i in rpc_items)
+    blocked = [i for i in rpc_items if _is_blocked_call(i)]
+    if blocked and len(blocked) == len(rpc_items):
+        for i in blocked:
+            log.info(
+                "block: key=%s client=%s tool=%s",
+                key_name, client, i.get("params", {}).get("name"),
+            )
+        errors = [
+            {
+                "jsonrpc": "2.0",
+                "id": i.get("id"),
+                "error": {
+                    "code": -32601,
+                    "message": "Tool disabled by proxy: %s"
+                    % i.get("params", {}).get("name"),
+                },
+            }
+            for i in blocked
+        ]
+        payload = errors if isinstance(parsed[0], list) else errors[0]
+        accept = request.headers.get("Accept", "")
+        if "text/event-stream" in accept and "application/json" not in accept:
+            sse = "event: message\ndata: %s\n\n" % json.dumps(payload, ensure_ascii=False)
+            return web.Response(text=sse, content_type="text/event-stream")
+        return web.json_response(payload)
+    if blocked:
+        log.warning(
+            "batch mixes blocked tool(s) with other calls; passing through: key=%s client=%s",
+            key_name, client,
+        )
+
     timeout = aiohttp.ClientTimeout(total=3600, connect=30, sock_read=3600)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -162,6 +273,27 @@ async def proxy_handler(request: web.Request):
                     or upstream_resp.content_length is None
                 )
                 resp_headers = _filter_response_headers(upstream_resp.headers)
+                if wants_tools_list and upstream_resp.status == 200:
+                    payload = await upstream_resp.read()
+                    if "text/event-stream" in content_type:
+                        payload = _filter_sse_tools(payload)
+                    elif "application/json" in content_type:
+                        try:
+                            obj = json.loads(payload)
+                            if _filter_tools_in(obj):
+                                payload = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+                        except (ValueError, UnicodeDecodeError):
+                            pass
+                    resp_headers = {
+                        k: v
+                        for k, v in resp_headers.items()
+                        if k.lower() != "content-encoding"
+                    }
+                    return web.Response(
+                        status=upstream_resp.status,
+                        body=payload,
+                        headers=resp_headers,
+                    )
                 if is_stream:
                     resp = web.StreamResponse(status=upstream_resp.status, headers=resp_headers)
                     await resp.prepare(request)

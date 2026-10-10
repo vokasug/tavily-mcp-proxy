@@ -32,7 +32,8 @@ systemd timer (05:00 Europe/Moscow, daily):
 
 | Путь | Назначение |
 |---|---|
-| `backend.py` | aiohttp-сервис: аутентифицирует клиентов и проксирует `/mcp/*` к Tavily с активным ключом |
+| `backend.py` | aiohttp-сервис: аутентифицирует клиентов, проксирует `/mcp/*` к Tavily с активным ключом, скрывает/блокирует инструменты из `BLOCKED_TOOLS` |
+| `test_backend.py` | Селфтест: поднимает backend + mock-upstream и проверяет фильтрацию/блокировку инструментов (`python3 test_backend.py`) |
 | `quota_checker.py` | Ежедневный селектор: выбирает Tavily-ключ с максимальным остатком квоты, при равенстве — лексикографически первый |
 | `requirements.txt` | `aiohttp>=3.9` |
 | `deploy/tavily-mcp-backend.service` | systemd-юнит бэкенда |
@@ -113,6 +114,9 @@ kill -HUP $(pgrep -f backend.py)
   3. Конструирует upstream URL: тот же path + query string с заменой `accessKey` → `tavilyApiKey=<active>`.
   4. Проксирует на `https://mcp.tavily.com<path>?<query>` через `aiohttp.ClientSession`.
   5. Если upstream отвечает `text/event-stream` / `Transfer-Encoding: chunked` / нет `Content-Length` — ретранслирует чанки через `web.StreamResponse` (SSE). Иначе — обычный `web.Response`.
+- **Скрытие инструментов** (`BLOCKED_TOOLS`, по умолчанию `tavily_crawl,tavily_research`; переопределяется env `TAVILY_MCP_BLOCKED_TOOLS` — список через запятую, пустая строка отключает фильтрацию):
+  - Ответы на `tools/list` (и SSE, и JSON) буферизуются, заблокированные инструменты вырезаются из `result.tools` — агенты про них не знают.
+  - Запросы `tools/call` к заблокированному инструменту отклоняются на прокси JSON-RPC ошибкой `-32601 Tool disabled by proxy` (HTTP 200), без обращения к upstream и без траты квоты. Формат ответа (JSON или SSE) подбирается по `Accept` клиента. Batch с смешанными вызовами (на практике MCP-клиенты не используют) проксируется как есть с WARNING в лог.
 - Таймауты: connect 30s, total/sock_read 3600s.
 - Логи в journal: `req: key=<имя> client=<реальный IP> method=<m> path=<p> rpc=<jsonrpc-метод>[:<инструмент> <args≤200 chars>]` — без секретов (встроенный access-log aiohttp отключён: он слил бы `accessKey` из query string). Реальный IP берётся из `X-Forwarded-For`, который ставит nginx. Статистика по ключам: `journalctl -u tavily-mcp-backend | grep -c 'req: key=<имя>'`.
 - Сигналы: SIGTERM/SIGINT — graceful shutdown; SIGHUP — перечитать `access-keys.list`.
