@@ -336,7 +336,3 @@ nginx -t && systemctl reload nginx"
 | `/var/log/nginx/mcp_error.log` | nginx error |
 | `journalctl -u tavily-mcp-backend` | Лог бэкенда (без секретов) |
 | `journalctl -u tavily-mcp-quota` | Лог quota-checker'а |
-
-## Лицензия
-
-MIT (заглушка — поменяйте по желанию).
