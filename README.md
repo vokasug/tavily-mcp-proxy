@@ -32,7 +32,7 @@ systemd timer (05:00 Europe/Moscow, daily):
 
 | Путь | Назначение |
 |---|---|
-| `backend.py` | aiohttp-сервис: аутентифицирует клиентов, проксирует `/mcp/*` к Tavily с активным ключом, скрывает/блокирует инструменты из `BLOCKED_TOOLS` |
+| `backend.py` | aiohttp-сервис: аутентифицирует клиентов, проксирует `/mcp/*` к Tavily с активным ключом, скрывает/блокирует инструменты из `BLOCKED_TOOLS`, вырезает capabilities из `STRIPPED_CAPABILITIES` в ответах `initialize` |
 | `test_backend.py` | Селфтест: поднимает backend + mock-upstream и проверяет фильтрацию/блокировку инструментов (`python3 test_backend.py`) |
 | `quota_checker.py` | Ежедневный селектор: выбирает Tavily-ключ с максимальным остатком квоты, при равенстве — лексикографически первый |
 | `requirements.txt` | `aiohttp>=3.9` |
@@ -117,6 +117,7 @@ kill -HUP $(pgrep -f backend.py)
 - **Скрытие инструментов** (`BLOCKED_TOOLS`, по умолчанию `tavily_crawl,tavily_research`; переопределяется env `TAVILY_MCP_BLOCKED_TOOLS` — список через запятую, пустая строка отключает фильтрацию):
   - Ответы на `tools/list` (и SSE, и JSON) буферизуются, заблокированные инструменты вырезаются из `result.tools` — агенты про них не знают.
   - Запросы `tools/call` к заблокированному инструменту отклоняются на прокси JSON-RPC ошибкой `-32601 Tool disabled by proxy` (HTTP 200), без обращения к upstream и без траты квоты. Формат ответа (JSON или SSE) подбирается по `Accept` клиента. Batch с смешанными вызовами (на практике MCP-клиенты не используют) проксируется как есть с WARNING в лог.
+- **Скрытие capabilities** (`STRIPPED_CAPABILITIES`, по умолчанию `prompts,resources`; переопределяется env `TAVILY_MCP_STRIPPED_CAPABILITIES` — список через запятую, пустая строка отключает): ответы на `initialize` (SSE и JSON) буферизуются, перечисленные capabilities вырезаются из `result.capabilities`. У Tavily `prompts/list` и `resources/list` всегда пустые, а Hermes-agent на заявленные capabilities генерирует бесполезные утилитные тулзы (`mcp__*__list_prompts` и т.п.), засоряющие системный промпт — после вырезания клиенты про них не знают.
 - Таймауты: connect 30s, total/sock_read 3600s.
 - Логи в journal: `req: key=<имя> client=<реальный IP> method=<m> path=<p> rpc=<jsonrpc-метод>[:<инструмент> <args≤200 chars>]` — без секретов (встроенный access-log aiohttp отключён: он слил бы `accessKey` из query string). Реальный IP берётся из `X-Forwarded-For`, который ставит nginx. Статистика по ключам: `journalctl -u tavily-mcp-backend | grep -c 'req: key=<имя>'`.
 - Сигналы: SIGTERM/SIGINT — graceful shutdown; SIGHUP — перечитать `access-keys.list`.

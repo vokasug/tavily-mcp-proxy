@@ -30,8 +30,13 @@ async def mock_mcp(request):
     rid = items[0].get("id")
     if method == "initialize":
         result = {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
+            "protocolVersion": "2025-06-18",
+            "capabilities": {
+                "logging": {},
+                "prompts": {"listChanged": True},
+                "resources": {"subscribe": False, "listChanged": True},
+                "tools": {"listChanged": True},
+            },
             "serverInfo": {"name": "mock-tavily", "version": "0"},
         }
     elif method == "tools/list":
@@ -101,13 +106,24 @@ async def main():
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. initialize проходит
+            # 1. initialize проходит, capabilities prompts/resources вырезаны (SSE)
             status, msg = await rpc(session, url, {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                            "clientInfo": {"name": "t", "version": "1"}},
             })
             assert status == 200 and msg["result"]["serverInfo"]["name"] == "mock-tavily", (status, msg)
+            caps = msg["result"]["capabilities"]
+            assert caps == {"logging": {}, "tools": {"listChanged": True}}, caps
+
+            # 1b. initialize (JSON-ответ от upstream): capabilities тоже вырезаны
+            status, msg = await rpc(session, url, {
+                "jsonrpc": "2.0", "id": 10, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                           "clientInfo": {"name": "t", "version": "1"}},
+            }, extra_headers={"X-Mock-Json": "1"})
+            caps = msg["result"]["capabilities"]
+            assert status == 200 and caps == {"logging": {}, "tools": {"listChanged": True}}, (status, caps)
 
             # 2. tools/list (SSE): заблокированные тулзы скрыты
             status, msg = await rpc(session, url, {

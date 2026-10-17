@@ -22,6 +22,13 @@ BLOCKED_TOOLS = frozenset(
     ).split(",")
     if t.strip()
 )
+STRIPPED_CAPABILITIES = frozenset(
+    t.strip()
+    for t in os.environ.get(
+        "TAVILY_MCP_STRIPPED_CAPABILITIES", "prompts,resources"
+    ).split(",")
+    if t.strip()
+)
 
 ACCESS_KEYS_FILE = CONFIG_DIR / "access-keys.list"
 ACTIVE_KEY_FILE = CONFIG_DIR / "active-key"
@@ -154,7 +161,25 @@ def _filter_tools_in(obj):
     return removed
 
 
-def _filter_sse_tools(payload):
+def _filter_capabilities_in(obj):
+    items = obj if isinstance(obj, list) else [obj]
+    removed = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result")
+        if not isinstance(result, dict):
+            continue
+        caps = result.get("capabilities")
+        if isinstance(caps, dict):
+            for name in STRIPPED_CAPABILITIES:
+                if name in caps:
+                    del caps[name]
+                    removed.append(name)
+    return removed
+
+
+def _filter_sse(payload, filter_fn, label):
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError:
@@ -172,9 +197,9 @@ def _filter_sse_tools(payload):
         except ValueError:
             out.append(event)
             continue
-        removed = _filter_tools_in(obj)
+        removed = filter_fn(obj)
         if removed:
-            log.info("tools/list: hid %s", ", ".join(sorted(set(removed))))
+            log.info("%s: hid %s", label, ", ".join(sorted(set(removed))))
             lines = [l for l in lines if not l.startswith("data:")]
             lines.append("data: " + json.dumps(obj, ensure_ascii=False))
             out.append("\n".join(lines))
@@ -226,6 +251,12 @@ async def proxy_handler(request: web.Request):
     parsed = _parse_rpc_items(body)
     rpc_items = parsed[1] if parsed else []
     wants_tools_list = any(i.get("method") == "tools/list" for i in rpc_items)
+    wants_initialize = any(i.get("method") == "initialize" for i in rpc_items)
+    filters = []
+    if wants_tools_list:
+        filters.append((_filter_tools_in, "tools/list"))
+    if wants_initialize:
+        filters.append((_filter_capabilities_in, "initialize"))
     blocked = [i for i in rpc_items if _is_blocked_call(i)]
     if blocked and len(blocked) == len(rpc_items):
         for i in blocked:
@@ -274,14 +305,23 @@ async def proxy_handler(request: web.Request):
                     or upstream_resp.content_length is None
                 )
                 resp_headers = _filter_response_headers(upstream_resp.headers)
-                if wants_tools_list and upstream_resp.status == 200:
+                if filters and upstream_resp.status == 200:
                     payload = await upstream_resp.read()
                     if "text/event-stream" in content_type:
-                        payload = _filter_sse_tools(payload)
+                        for filter_fn, label in filters:
+                            payload = _filter_sse(payload, filter_fn, label)
                     elif "application/json" in content_type:
                         try:
                             obj = json.loads(payload)
-                            if _filter_tools_in(obj):
+                            changed = False
+                            for filter_fn, label in filters:
+                                removed = filter_fn(obj)
+                                if removed:
+                                    log.info(
+                                        "%s: hid %s", label, ", ".join(sorted(set(removed)))
+                                    )
+                                    changed = True
+                            if changed:
                                 payload = json.dumps(obj, ensure_ascii=False).encode("utf-8")
                         except (ValueError, UnicodeDecodeError):
                             pass
