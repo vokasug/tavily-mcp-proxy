@@ -3,7 +3,7 @@
 Reverse-прокси для эндпоинта [Tavily MCP](https://www.tavily.com), который:
 
 1. **Обходит гео-блокировку** для клиентов на IP из санкционных территорий (RU и др.) — прокси живёт на VPS в стране, откуда Tavily доступен, и пересылает запросы. Tavily блокирует такие IP на уровне AWS ELB (см. tavily.com/terms — «Sanctioned Territory»): любой запрос к `mcp.tavily.com` / `api.tavily.com` получает `403 Forbidden` от `awselb/2.0` ещё до проверки API-ключа (запрос без ключа даёт 403 вместо 401).
-2. **Ротирует несколько Tavily API-ключей**, выбирая раз в сутки ключ с наибольшим остатком квоты. Если ни один ключ не удалось проверить — прокси возвращает **HTTP 503** всем клиентам (fail-loud) до восстановления.
+2. **Ротирует несколько Tavily API-ключей**, выбирая раз в сутки ключ с наибольшим остатком квоты. При временном сбое проверки сохраняет последний рабочий ключ; если проверить ключи не удалось и рабочего ключа нет — прокси возвращает **HTTP 503** всем клиентам (fail-loud) до восстановления.
 3. **Аутентифицирует клиентов** по query-параметру `accessKey`, чтобы реальные Tavily-ключи никогда не попадали на клиентские машины и не светились в клиентских конфигах.
 
 ```
@@ -22,7 +22,8 @@ systemd timer (05:00 Europe/Moscow, daily):
     ├─ GET https://api.tavily.com/usage для каждого ключа
     ├─ выбирает max(plan_limit − plan_usage); при равенстве — лексикографически первый ключ
     └─ атомарно пишет /etc/tavily-mcp/active-key + active-key.status=ok
-       (если ни один ключ не удалось проверить — пишет пустой active-key
+       (при временном сбое сохраняет последний рабочий active-key;
+        если рабочего ключа нет или ошибка постоянная — пишет пустой active-key
         и active-key.status=unknown → backend отдаёт 503 всем клиентам)
 ```
 
@@ -34,6 +35,7 @@ systemd timer (05:00 Europe/Moscow, daily):
 |---|---|
 | `backend.py` | aiohttp-сервис: аутентифицирует клиентов, проксирует `/mcp/*` к Tavily с активным ключом, скрывает/блокирует инструменты из `BLOCKED_TOOLS`, вырезает capabilities из `STRIPPED_CAPABILITIES` в ответах `initialize` |
 | `test_backend.py` | Селфтест: поднимает backend + mock-upstream и проверяет фильтрацию/блокировку инструментов (`python3 test_backend.py`) |
+| `test_quota_checker.py` | Тесты повторных попыток, сохранения активного ключа и fail-loud поведения (`python3 -m unittest test_quota_checker.py`) |
 | `quota_checker.py` | Ежедневный селектор: выбирает Tavily-ключ с максимальным остатком квоты, при равенстве — лексикографически первый |
 | `requirements.txt` | `aiohttp>=3.9` |
 | `deploy/tavily-mcp-backend.service` | systemd-юнит бэкенда |
@@ -125,9 +127,10 @@ kill -HUP $(pgrep -f backend.py)
 `quota_checker.py`:
 
 - Парсит `tavily-keys.list` (пропускает пустые/комменты).
-- Последовательно делает `GET https://api.tavily.com/usage` с `Authorization: Bearer <key>` (timeout 10s на ключ).
+- Последовательно делает `GET https://api.tavily.com/usage` с `Authorization: Bearer <key>` (timeout 30s на запрос). Сетевые ошибки, таймауты, HTTP 429 и 5xx повторяются до 3 раз с паузами 2 и 5 секунд.
 - Берёт `account.plan_limit − account.plan_usage` как `remaining`. Не-200 / битый JSON / нет полей → ключ пропускается (WARNING).
-- Если **все** ключи пропущены → пишет пустой `active-key` + `active-key.status=unknown`, exit code **2**.
+- Если **все** ключи пропущены из-за временных ошибок и существует непустой `active-key` со статусом `ok` → сохраняет его без изменений, пишет ERROR в журнал и завершается с exit code **2**; backend продолжает обслуживать клиентов.
+- Если **все** ключи пропущены и последнего рабочего ключа нет либо среди ошибок есть постоянная (например, HTTP 401) → пишет пустой `active-key` + `active-key.status=unknown`, exit code **2**; backend отдаёт 503.
 - Иначе выбирает `max(remaining)`, при равенстве — лексикографически первый ключ.
 - Атомарная запись `active-key` + `active-key.status=ok`, лог через journal.
 - Рассчитан на 1 запуск в сутки — не запускайте чаще, чем раз в несколько минут (Tavily rate-limit'ит `/usage`).
@@ -202,7 +205,8 @@ ssh vps "cat /etc/tavily-mcp/active-key"       # лексикографичес�
 ## Troubleshooting
 
 - **502/504 от прокси** — бэкенд не смог достучаться до Tavily: `journalctl -u tavily-mcp-backend -n 20`. Проверить `curl -m 5 https://mcp.tavily.com` с VPS (должен быть 406/400, не 403).
-- **503 на все запросы** — fail-loud: `cat /etc/tavily-mcp/active-key` (пуст?) и `active-key.status` (`unknown`?). Если оба — quota-checker не смог проверить ни один ключ: `journalctl -u tavily-mcp-quota -n 10`. Восстановить вручную: `/opt/tavily-mcp/venv/bin/python /opt/tavily-mcp/quota_checker.py`. Типичная причина массовых 401/429 от `/usage` — rate-limit (не запускайте quota_checker чаще, чем раз в несколько минут).
+- **503 на все запросы** — fail-loud: `cat /etc/tavily-mcp/active-key` (пуст?) и `active-key.status` (`unknown`?). Если оба — quota-checker не смог проверить ни один ключ и не смог сохранить последний рабочий: `journalctl -u tavily-mcp-quota -n 10`. Восстановить вручную: `/opt/tavily-mcp/venv/bin/python /opt/tavily-mcp/quota_checker.py`. Проверьте HTTP 401 (невалидный ключ) и 429 (rate-limit; не запускайте quota_checker чаще, чем раз в несколько минут).
+- **Quota service failed, но MCP работает** — проверка завершилась временной ошибкой, последний рабочий ключ сохранён. Причина видна в `journalctl -u tavily-mcp-quota -n 20`; после восстановления сети можно повторно выполнить `systemctl start tavily-mcp-quota.service`.
 - **Бэкенд не стартует** — `journalctl -u tavily-mcp-backend -e`. Типичные причины: не установлен aiohttp в venv, занят порт 8741, syntax error в backend.py после правок.
 - **Квоты не обновляются** — `systemctl list-timers tavily-mcp-quota.timer` (NEXT/LAST). Если NEXT в прошлом — `systemctl start tavily-mcp-quota.service` принудительно; если снова не помогло — проверить `OnCalendar=*-*-* 05:00:00 Europe/Moscow` и часовой пояс: `timedatectl`.
 - **Клиент: server unavailable** — сначала curl-тест initialize (см. «Проверки»); затем лог клиента (для OpenCode: `grep tavily ~/.local/share/opencode/log/opencode.log`).

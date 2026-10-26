@@ -8,14 +8,16 @@ sets /etc/tavily-mcp/active-key.status accordingly.
 
 Exit codes:
   0  selection successful (or all keys had identical remaining=0)
-  2  failed to obtain quota for ANY key -> active-key.status="unknown"
-     (active-key is emptied so the backend returns 503)
+  2  failed to obtain quota for ANY key; a valid active key is preserved
+     after temporary errors, otherwise active-key.status="unknown" and
+     active-key is emptied so the backend returns 503
 """
 import json
 import logging
 import os
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -25,9 +27,16 @@ KEYS_FILE = CONFIG_DIR / "tavily-keys.list"
 ACTIVE_KEY_FILE = CONFIG_DIR / "active-key"
 ACTIVE_KEY_STATUS = CONFIG_DIR / "active-key.status"
 USAGE_URL = "https://api.tavily.com/usage"
-TIMEOUT = 10
+TIMEOUT = 30
+RETRY_DELAYS = (2, 5)
 
 log = logging.getLogger("tavily-mcp-quota")
+
+
+class QuotaFetchError(Exception):
+    def __init__(self, message, transient):
+        super().__init__(message)
+        self.transient = transient
 
 
 def read_keys():
@@ -48,30 +57,48 @@ def fetch_quota(key):
         USAGE_URL,
         headers={"Authorization": f"Bearer {key}", "User-Agent": "tavily-mcp-quota/1.0"},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            body = resp.read()
-            status = resp.status
-    except urllib.error.HTTPError as e:
-        log.warning("HTTP %s for key %s…", e.code, key[:14])
-        return None
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        log.warning("network error for key %s…: %s", key[:14], e)
-        return None
-    if status != 200:
-        log.warning("non-200 %s for key %s…", status, key[:14])
-        return None
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                body = resp.read()
+                status = resp.status
+        except urllib.error.HTTPError as e:
+            transient = e.code == 429 or 500 <= e.code < 600
+            if not transient:
+                log.warning("HTTP %s for key %s…", e.code, key[:14])
+                raise QuotaFetchError(f"HTTP {e.code}", transient=False) from e
+            error = f"HTTP {e.code}"
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            error = str(e)
+        else:
+            if status == 200:
+                break
+            transient = status == 429 or 500 <= status < 600
+            if not transient:
+                log.warning("non-200 %s for key %s…", status, key[:14])
+                raise QuotaFetchError(f"HTTP {status}", transient=False)
+            error = f"HTTP {status}"
+        if attempt < len(RETRY_DELAYS):
+            delay = RETRY_DELAYS[attempt]
+            log.warning(
+                "temporary error for key %s…: %s; retrying in %ds",
+                key[:14], error, delay,
+            )
+            time.sleep(delay)
+        else:
+            log.warning("temporary error for key %s…: %s", key[:14], error)
+            raise QuotaFetchError(error, transient=True)
     try:
         data = json.loads(body)
     except json.JSONDecodeError as e:
         log.warning("bad JSON for key %s…: %s", key[:14], e)
-        return None
+        raise QuotaFetchError("invalid JSON", transient=False) from e
     account = data.get("account") or {}
     plan_limit = account.get("plan_limit")
     plan_usage = account.get("plan_usage")
     if not isinstance(plan_limit, (int, float)) or not isinstance(plan_usage, (int, float)):
         log.warning("missing/invalid plan fields for key %s…: %s", key[:14], account)
-        return None
+        raise QuotaFetchError("missing/invalid plan fields", transient=False)
     return {"remaining": plan_limit - plan_usage, "used": plan_usage, "limit": plan_limit}
 
 
@@ -92,6 +119,16 @@ def atomic_write(path: Path, content: str):
         raise
 
 
+def has_active_key():
+    try:
+        return (
+            ACTIVE_KEY_STATUS.read_text().strip() == "ok"
+            and bool(ACTIVE_KEY_FILE.read_text().strip())
+        )
+    except OSError:
+        return False
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -105,18 +142,27 @@ def main():
         return 2
 
     results = []
+    failures = []
     for k in keys:
-        info = fetch_quota(k)
-        if info is not None:
-            log.info(
-                "key=%s… remaining=%s (used=%s/%s)",
-                k[:14], info["remaining"], info["used"], info["limit"],
-            )
-            results.append((k, info))
-        else:
-            log.warning("skipping key %s… (quota unavailable)", k[:14])
+        try:
+            info = fetch_quota(k)
+        except QuotaFetchError as e:
+            log.warning("skipping key %s… (quota unavailable: %s)", k[:14], e)
+            failures.append(e)
+            continue
+        log.info(
+            "key=%s… remaining=%s (used=%s/%s)",
+            k[:14], info["remaining"], info["used"], info["limit"],
+        )
+        results.append((k, info))
 
     if not results:
+        if failures and all(e.transient for e in failures) and has_active_key():
+            log.error(
+                "quota refresh failed temporarily for all %d keys; keeping active key",
+                len(keys),
+            )
+            return 2
         log.error("no quota data for any of %d keys -> fail-loud (503)", len(keys))
         atomic_write(ACTIVE_KEY_FILE, "")
         atomic_write(ACTIVE_KEY_STATUS, "unknown\n")
